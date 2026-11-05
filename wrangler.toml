@@ -1,0 +1,24 @@
+name = "telegram-code-assistant"
+main = "worker.js"
+compatibility_date = "2024-11-05"
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "your-d1-db-name"
+database_id = "your-d1-database-id"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "STATS"
+id = "your-kv-namespace-id"
+
+[[kv_namespaces]]
+binding = "FILES"
+id = "your-kv-namespace-id-2"
+
+# Environment Variables (Secrets should be set via wrangler secret)
+[vars]
+DEFAULT_AI_MODEL = "anthropic/claude-sonnet-4"
+MEMORY_DEFAULT_MESSAGES = "30"
+MEMORY_TTL_HOURS = "72"
