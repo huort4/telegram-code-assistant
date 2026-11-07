@@ -1,6 +1,6 @@
-// worker.js - دستیار کدنویسی تلگرام + پنل ادمین (نسخه 2)
+// worker.js - دستیار کدنویسی تلگرام + پنل ادمین (نسخه 3)
 // امکانات: دیباگ کد با AI، حافظه گفتگو (D1)، جستجوی وب، خواندن اسکرین‌شات خطا،
-//          خواندن فایل، تحلیل کامل مخزن (ZIP)
+//          خواندن فایل، تحلیل کامل مخزن (ZIP)، اتصال مدل هوش مصنوعی شخصی هر کاربر (/ai)
 // مدل: anthropic/claude-sonnet-4 | Base URL: bedrock-mantle
 //
 // Bindings لازم: DB (D1) ، STATS (KV) ، FILES (KV)
@@ -584,17 +584,210 @@ headers: { 'Content-Type': 'text/html; charset=utf-8' }
 }
 
 
+// =============== اتصال هوش مصنوعی شخصی هر کاربر (BYO) ===============
+// کاربر می‌تواند Base URL و API Key و نام مدل خودش (پولی یا رایگان) را بدهد
+// و همه قابلیت‌های ربات با مدل خودش کار کند.
+// کلید API هر کاربر جداگانه در KV ذخیره می‌شود، هرگز به مدل نشان داده نمی‌شود
+// و پیام حاوی کلید بلافاصله از چت پاک می‌شود.
+
+function aiConnKey(userId) { return `ai_conn:${userId}`; }
+function aiFlowKey(userId) { return `ai_flow:${userId}`; }
+
+async function getUserAIConn(userId, env) {
+if (!userId) return null;
+try {
+const raw = await env.STATS.get(aiConnKey(userId));
+if (!raw) return null;
+const conn = JSON.parse(raw);
+return (conn && conn.base_url && conn.api_key && conn.model) ? conn : null;
+} catch (e) { return null; }
+}
+
+// آیا اصلاً هوش مصنوعی در دسترس است؟ (اتصال شخصی کاربر → تنظیمات ادمین → متغیر محیطی)
+async function hasAnyAI(userId, env, settings) {
+if (settings?.ai_api_key || env.OPENAI_API_KEY) return true;
+return !!(await getUserAIConn(userId, env));
+}
+
+// دکمه‌های شیشه‌ای ثابت منوی هوش مصنوعی
+function aiMenuKeyboard(connected) {
+const rows = [[{ text: '🔌 اتصال مدل شخصی', callback_data: 'ai:connect' }]];
+rows.push(connected
+? [{ text: '📊 وضعیت اتصال', callback_data: 'ai:status' }, { text: '🗑 حذف اتصال', callback_data: 'ai:remove' }]
+: [{ text: '📊 وضعیت اتصال', callback_data: 'ai:status' }]);
+return rows;
+}
+
+const CANCEL_KB = [[{ text: '❌ لغو', callback_data: 'ai:cancel' }]];
+
+async function sendAiMenu(chatId, userId, env) {
+const conn = await getUserAIConn(userId, env);
+let text;
+if (conn) {
+text = '🤖 هوش مصنوعی شخصی شما:\n\n' +
+`• Base URL: ${conn.base_url}\n` +
+`• مدل: ${conn.model}\n` +
+`• API Key: ${maskApiKey(conn.api_key)}\n\n` +
+'✅ همه قابلیت‌های ربات (چت، دیباگ، تحلیل عکس، فایل، ZIP و ایجنت گیت‌هاب) با مدل شما کار می‌کنند.';
+} else {
+text = '🤖 هوش مصنوعی شخصی:\n\n' +
+'اگر به مدل پولی یا رایگان دسترسی داری (هر سرویس سازگار با OpenAI API)، اتصالش کن تا همه قابلیت‌های ربات با مدل خودت کار کنه.\n\n' +
+'چیزهایی که لازمه:\n' +
+'1️⃣ Base URL — باید به /v1 ختم بشه. مثال:\nhttps://api.openai.com/v1\n' +
+'2️⃣ API Key خودت\n' +
+'3️⃣ نام مدل — مثال: gpt-4o-mini';
+}
+await sendMessage(chatId, text, env, aiMenuKeyboard(!!conn));
+}
+
+// تست اتصال با مشخصات شخصی کاربر (مستقیم، بدون ذخیره)
+async function testUserAIConn(conn, env) {
+const res = await fetch(`${conn.base_url.replace(/\/+$/, '')}/chat/completions`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+'Authorization': `Bearer ${conn.api_key}`
+},
+body: JSON.stringify({
+model: conn.model,
+messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
+max_tokens: 10
+})
+});
+const data = await res.json().catch(() => ({}));
+if (!res.ok) {
+const err = new Error(data.error?.message || data.message || `خطای سرویس (کد ${res.status})`);
+err.status = res.status;
+throw err;
+}
+const content = data.choices?.[0]?.message?.content;
+if (!content) throw new Error('پاسخی از مدل دریافت نشد');
+return String(content).trim().substring(0, 60);
+}
+
+// پردازش دکمه‌های شیشه‌ای (callback)
+async function handleCallbackQuery(cb, env) {
+try { await answerCallbackQuery(cb.id, env); } catch (e) {}
+const chatId = cb.message?.chat?.id;
+const userId = cb.from?.id;
+const data = cb.data || '';
+if (!chatId || !userId) return;
+try {
+if (data === 'ai:menu') {
+await sendAiMenu(chatId, userId, env);
+} else if (data === 'ai:cancel') {
+await env.STATS.delete(aiFlowKey(userId));
+await sendAiMenu(chatId, userId, env);
+} else if (data === 'ai:connect') {
+await env.STATS.put(aiFlowKey(userId), JSON.stringify({ step: 'base_url', data: {} }), { expirationTtl: 600 });
+await sendMessage(chatId,
+'🔗 قدم ۱ از ۳ — Base URL سرویس را بفرست.\n\nباید به /v1 ختم بشه. چند مثال:\n' +
+'https://api.openai.com/v1\n' +
+'https://api.groq.com/openai/v1\n' +
+'https://openrouter.ai/api/v1\n\n' +
+'برای لغو، دکمه پایین یا دستور /cancel', env, CANCEL_KB);
+} else if (data === 'ai:status') {
+await sendAiMenu(chatId, userId, env);
+} else if (data === 'ai:remove') {
+await env.STATS.delete(aiConnKey(userId));
+await env.STATS.delete(aiFlowKey(userId));
+await sendMessage(chatId, '🗑 اتصال هوش مصنوعی شخصی حذف شد.\nاز این به بعد از مدل پیش‌فرض ربات استفاده میشه (اگر ادمین تنظیم کرده باشه).', env, aiMenuKeyboard(false));
+}
+} catch (e) {
+console.error('callback error', e);
+}
+}
+
+async function answerCallbackQuery(id, env, text) {
+try {
+await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ callback_query_id: id, ...(text ? { text } : {}) })
+});
+} catch (e) {}
+}
+
+// ورودی‌های جریان اتصال (wizard). اگر پیام مربوط به جریان بود true برمی‌گردد.
+async function handleAiFlowInput(chatId, userId, text, env, messageId) {
+const raw = await env.STATS.get(aiFlowKey(userId));
+if (!raw) return false;
+let flow;
+try { flow = JSON.parse(raw); } catch (e) { await env.STATS.delete(aiFlowKey(userId)); return false; }
+
+const t = (text || '').trim();
+if (!t) return false;
+if (t.toLowerCase() === '/cancel' || t === 'لغو') {
+await env.STATS.delete(aiFlowKey(userId));
+await sendMessage(chatId, '❌ اتصال لغو شد.', env, aiMenuKeyboard(false));
+return true;
+}
+
+if (flow.step === 'base_url') {
+const url = t.replace(/\/+$/, '');
+if (!/^https?:\/\/[^\s]+\/v1$/i.test(url)) {
+await sendMessage(chatId, '⚠️ Base URL باید با /v1 تمام بشه.\nمثال درست: https://api.openai.com/v1\nدوباره بفرست یا /cancel', env, CANCEL_KB);
+return true;
+}
+flow = { step: 'api_key', data: { base_url: url } };
+await env.STATS.put(aiFlowKey(userId), JSON.stringify(flow), { expirationTtl: 600 });
+await sendMessage(chatId, '✅ Base URL ثبت شد.\n\n🔑 قدم ۲ از ۳ — حالا API Key را بفرست.\n\n🔒 پیام کلید بلافاصله از چت پاک میشه و فقط برای خودت ذخیره میشه.', env, CANCEL_KB);
+return true;
+}
+
+if (flow.step === 'api_key') {
+if (t.length < 8 || /\s/.test(t)) {
+await sendMessage(chatId, '⚠️ این به نظر کلید API معتبری نمیاد (بدون فاصله و حداقل ۸ کاراکتر). دوباره بفرست یا /cancel', env, CANCEL_KB);
+return true;
+}
+const deleted = await deleteTelegramMessage(chatId, messageId, env);
+flow = { step: 'model', data: { ...flow.data, api_key: t } };
+await env.STATS.put(aiFlowKey(userId), JSON.stringify(flow), { expirationTtl: 600 });
+let msg = '✅ API Key ثبت شد' + (deleted ? ' و پیامش از چت پاک شد.' : '. (نتونستم پیامش رو پاک کنم؛ خودت پاکش کن)');
+msg += '\n\n🧠 قدم ۳ از ۳ — حالا نام مدل را بفرست.\nمثال: gpt-4o-mini یا llama-3.3-70b-versatile';
+await sendMessage(chatId, msg, env, CANCEL_KB);
+return true;
+}
+
+if (flow.step === 'model') {
+if (t.includes('\n') || t.length > 100) {
+await sendMessage(chatId, '⚠️ فقط نام مدل را بفرست. مثال: gpt-4o-mini\nدوباره بفرست یا /cancel', env, CANCEL_KB);
+return true;
+}
+const conn = { ...flow.data, model: t };
+await sendChatAction(chatId, 'typing', env);
+try {
+await testUserAIConn(conn, env);
+await env.STATS.put(aiConnKey(userId), JSON.stringify(conn));
+await env.STATS.delete(aiFlowKey(userId));
+await sendMessage(chatId,
+`🎉 متصل شدی! از این به بعد همه قابلیت‌های ربات با مدل «${conn.model}» کار می‌کنند.\n\n` +
+'💡 برای تحلیل عکس، مدل باید قابلیت بینایی (vision) داشته باشه.\n' +
+'برای تغییر یا حذف، دوباره /ai رو بزن.', env, aiMenuKeyboard(true));
+} catch (e) {
+// جریان در همین قدم می‌ماند تا کاربر نام مدل دیگری بفرشد
+await sendMessage(chatId,
+`❌ تست اتصال ناموفق بود: ${e.message}\n\n` +
+'نام مدل دیگری بفرست، یا اگر Base URL / کلید مشکل داره با /cancel خارج شو و از اول /ai رو بزن.', env, CANCEL_KB);
+}
+return true;
+}
+
+return false;
+}
+
 // =============== موتور هوش مصنوعی (سازگار با OpenAI API) ===============
 
 async function callAI(messages, env, options = {}) {
 const settings = await getSettingsData(env);
-const apiKey = settings.ai_api_key || env.OPENAI_API_KEY || '';
-// اولویت: پنل → متغیر محیطی → مقدار پیش‌فرض پروژه
-const baseUrl = (settings.ai_base_url || env.OPENAI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/+$/, '');
-const model = options.model || settings.ai_model || DEFAULT_AI_MODEL;
+// اولویت مدل: اتصال شخصی کاربر → پنل ادمین → متغیر محیطی → پیش‌فرض پروژه
+const userConn = options.userId ? await getUserAIConn(options.userId, env) : null;
+const apiKey = userConn?.api_key || settings.ai_api_key || env.OPENAI_API_KEY || '';
+const baseUrl = (userConn?.base_url || settings.ai_base_url || env.OPENAI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/+$/, '');
+const model = userConn?.model || options.model || settings.ai_model || DEFAULT_AI_MODEL;
 
 if (!apiKey) {
-throw new Error('کلید API هوش مصنوعی تنظیم نشده. از پنل ادمین (تب هوش مصنوعی) وارد کنید.');
+throw new Error('کلید API هوش مصنوعی تنظیم نشده. ادمین از پنل (تب هوش مصنوعی) وارد کند، یا خودت با دستور /ai مدل شخصی‌ات را وصل کن.');
 }
 
 const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -741,6 +934,12 @@ await env.DB.prepare('DELETE FROM chat_history WHERE chat_id = ?').bind(chatId).
 // =============== مدیریت پیام‌های تلگرام ===============
 
 async function handleUpdate(update, env) {
+// دکمه‌های شیشه‌ای (inline) — منوی هوش مصنوعی شخصی
+if (update.callback_query) {
+await handleCallbackQuery(update.callback_query, env);
+return;
+}
+
 if (!update.message) return;
 
 const chatId = update.message.chat.id;
@@ -758,7 +957,7 @@ await saveUser(userId, username, chatId, env);
 await incrementStat('total_messages', env);
 
 if (photo) {
-await handlePhoto(chatId, photo, caption, env);
+await handlePhoto(chatId, userId, photo, caption, env);
 await incrementStat('total_files', env);
 } else if (document) {
 await handleDocument(chatId, document, caption, env, userId);
@@ -768,6 +967,8 @@ await handleCommand(chatId, userId, text, env, messageId);
 } else if (looksLikeGithubToken(text)) {
 // کاربر توکن را بدون دستور فرستاده
 await saveGithubTokenFromChat(chatId, userId, text.trim(), env, messageId);
+} else if (await handleAiFlowInput(chatId, userId, text, env, messageId)) {
+// پیام در جریان اتصال مدل شخصی مصرف شد
 } else {
 await handleText(chatId, userId, text, env);
 }
@@ -786,7 +987,18 @@ const settings = await getSettingsData(env);
 
 switch (command) {
 case '/start': {
-await sendMessage(chatId, settings.welcome_message || 'به دستیار کدنویسی خوش آمدید! 🤖', env);
+await sendMessage(chatId, settings.welcome_message || 'به دستیار کدنویسی خوش آمدید! 🤖', env, aiMenuKeyboard(!!(await getUserAIConn(userId, env))));
+break;
+}
+
+case '/ai': {
+if (['off', 'remove', 'حذف'].includes((args[0] || '').toLowerCase())) {
+await env.STATS.delete(aiConnKey(userId));
+await env.STATS.delete(aiFlowKey(userId));
+await sendMessage(chatId, '🗑 اتصال هوش مصنوعی شخصی حذف شد.', env, aiMenuKeyboard(false));
+} else {
+await sendAiMenu(chatId, userId, env);
+}
 break;
 }
 
@@ -794,6 +1006,7 @@ case '/help': {
 let help = '📋 راهنما:\n\n' +
 '/start - شروع مجدد\n' +
 '/help - نمایش این راهنما\n' +
+'/ai - اتصال مدل هوش مصنوعی شخصی (Base URL + API Key + نام مدل)\n' +
 '/lang <زبان> - تنظیم زبان پیش‌فرض\n' +
 '/clear - پاک کردن حافظه گفتگو\n\n' +
 '🤖 قابلیت‌ها:\n' +
@@ -804,6 +1017,8 @@ let help = '📋 راهنما:\n\n' +
 '• 📄 ارسال فایل کد → تحلیل و دیباگ فایل\n' +
 '• 🗜️ ارسال ZIP مخزن → باز کردن و خواندن کامل کدها و پیدا کردن باگ‌ها\n' +
 '• می‌توانید زیر عکس/فایل توضیح یا سوال خود را بنویسید (Caption)\n\n' +
+'🧠 هوش مصنوعی شخصی:\n' +
+'اگر به مدل پولی یا رایگان دسترسی داری، با /ai یا دکمه‌های ربات وصلش کن تا همه قابلیت‌ها با مدل خودت کار کنه.\n\n' +
 '🐙 گیت‌هاب:\n' +
 '/github <توکن> - وصل کردن گیت‌هاب (پیام توکن خودکار پاک می‌شود)\n' +
 '/github - وضعیت اتصال\n' +
@@ -811,10 +1026,10 @@ let help = '📋 راهنما:\n\n' +
 '/workspace - فایل‌های آماده برای پوش\n' +
 '/workspace_clear - خالی کردن فضای کار\n' +
 'بعد از وصل شدن، کافیه طبیعی بگی؛ مثلاً: «این ZIP رو تو یه ریپو خصوصی جدید به اسم my-app پوش کن»';
-if (!settings.ai_api_key && !env.OPENAI_API_KEY) {
-help += '\n\n⚠️ هوش مصنوعی هنوز تنظیم نشده است!';
+if (!(await hasAnyAI(userId, env, settings))) {
+help += '\n\n⚠️ هوش مصنوعی هنوز تنظیم نشده است! می‌توانید با /ai مدل شخصی خودتان را وصل کنید.';
 }
-await sendMessage(chatId, help, env);
+await sendMessage(chatId, help, env, aiMenuKeyboard(!!(await getUserAIConn(userId, env))));
 break;
 }
 
@@ -909,7 +1124,7 @@ return;
 await sendChatAction(chatId, 'typing', env);
 
 // ۳) ارسال به هوش مصنوعی — حالت ایجنت (گفتگو + ابزارها) همراه با حافظه گفتگو
-if (settings.ai_api_key || env.OPENAI_API_KEY) {
+if (await hasAnyAI(userId, env, settings)) {
 const isCode = isLikelyCode(text);
 if (isCode) await incrementStat('total_code', env);
 try {
@@ -923,7 +1138,7 @@ return;
 // ۴) بدون AI → تحلیل محلی ساده
 const report = analyzeCode(text, settings.default_language);
 await incrementStat('total_code', env);
-await sendLongMessage(chatId, report + '\n\n💡 برای دیباگ واقعی، کلید API هوش مصنوعی را در پنل ادمین تنظیم کنید.', env);
+await sendLongMessage(chatId, report + '\n\n💡 برای دیباگ واقعی، کلید API را در پنل ادمین تنظیم کنید یا با /ai مدل شخصی خودتان را وصل کنید.', env);
 }
 
 // تشخیص دقیق‌تر: کد یا لاگ خطا؟ (سوال‌های معمولی وارد پرامپت دیباگ نمی‌شوند)
@@ -935,7 +1150,7 @@ return lineCount >= 3 && detectLanguage(text) !== null;
 }
 
 // تحلیل عکس با مدل بینایی (Vision)
-async function handlePhoto(chatId, photo, caption, env) {
+async function handlePhoto(chatId, userId, photo, caption, env) {
 const settings = await getSettingsData(env);
 const largest = photo[photo.length - 1];
 
@@ -954,23 +1169,23 @@ file_id: largest.file_id,
 type: 'photo'
 }));
 
-if (!settings.ai_api_key && !env.OPENAI_API_KEY) {
-await sendMessage(chatId, '📸 عکس ذخیره شد.\n💡 برای تحلیل عکس با هوش مصنوعی، کلید API را در پنل ادمین تنظیم کنید.', env);
+if (!(await hasAnyAI(userId, env, settings))) {
+await sendMessage(chatId, '📸 عکس ذخیره شد.\n💡 برای تحلیل عکس با هوش مصنوعی، کلید API را در پنل ادمین تنظیم کنید یا با /ai مدل شخصی خودتان را وصل کنید.', env);
 return;
 }
 
 const buffer = await downloadTelegramFile(fileInfo.file_path, env);
 const mime = (fileInfo.file_path || '').toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
-await analyzeImage(chatId, buffer, mime, caption, env, settings);
+await analyzeImage(chatId, userId, buffer, mime, caption, env, settings);
 } catch (error) {
 await sendLongMessage(chatId, `❌ خطا در پردازش عکس: ${error.message}`, env);
 }
 }
 
 // خواندن اسکرین‌شات با مدل بینایی (هم برای عکس معمولی، هم عکسِ ارسال‌شده به‌صورت فایل)
-async function analyzeImage(chatId, buffer, mime, caption, env, settings) {
-if (!settings.ai_api_key && !env.OPENAI_API_KEY) {
-await sendMessage(chatId, '💡 برای تحلیل عکس، کلید API هوش مصنوعی را در پنل ادمین تنظیم کنید.', env);
+async function analyzeImage(chatId, userId, buffer, mime, caption, env, settings) {
+if (!(await hasAnyAI(userId, env, settings))) {
+await sendMessage(chatId, '💡 برای تحلیل عکس، کلید API هوش مصنوعی را در پنل ادمین تنظیم کنید یا با /ai مدل شخصی خودتان را وصل کنید.', env);
 return;
 }
 if (buffer.byteLength > 8 * 1024 * 1024) {
@@ -992,6 +1207,7 @@ const reply = await callAI([
 { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } }
 ] }
 ], env, {
+userId,
 model: settings.ai_vision_model || settings.ai_model,
 max_tokens: 1500
 });
@@ -1044,9 +1260,9 @@ await handleZipFile(chatId, buffer, fileName, env, settings, caption, userId);
 } else if (isImage) {
 // اسکرین‌شاتی که به‌صورت فایل (بدون فشرده‌سازی) فرستاده شده
 const imgMime = mimeType.startsWith('image/') ? mimeType : (ext === 'png' ? 'image/png' : 'image/jpeg');
-await analyzeImage(chatId, buffer, imgMime, caption, env, settings);
+await analyzeImage(chatId, userId, buffer, imgMime, caption, env, settings);
 } else if (isTextFile(ext, mimeType)) {
-await handleTextFile(chatId, buffer, fileName, env, settings, caption, userId);
+await handleTextFile(chatId, userId, buffer, fileName, env, settings, caption, userId);
 } else {
 await sendMessage(chatId, `📦 فایل «${fileName}» (${formatSizeClient(buffer.byteLength)}) ذخیره شد.\n💡 فقط فایل‌های متنی/کد، تصویر و ZIP تحلیل می‌شوند.`, env);
 }
@@ -1056,7 +1272,7 @@ await sendMessage(chatId, `❌ خطا در پردازش فایل: ${error.messag
 }
 
 // خواندن و تحلیل فایل متنی/کد
-async function handleTextFile(chatId, buffer, fileName, env, settings, caption = '', userId = null) {
+async function handleTextFile(chatId, userId, buffer, fileName, env, settings, caption = '') {
 const text = new TextDecoder().decode(buffer);
 
 // فایل به فضای کار اضافه می‌شود تا بشود بعداً آن را ویرایش یا پوش کرد
@@ -1069,15 +1285,15 @@ wsNote = fileName;
 }
 
 // اگر کاربر زیر فایل درخواست نوشته (مثلاً «اینو تو ریپوی X پوش کن»)، ایجنت انجامش می‌دهد
-if (caption && (settings.ai_api_key || env.OPENAI_API_KEY)) {
+if (caption && (await hasAnyAI(userId, env, settings))) {
 const preview = text.length > 30000 ? text.substring(0, 30000) + '\n... [ادامه فایل در فضای کار موجود است]' : text;
 await runAgent(chatId, userId, `[کاربر فایل «${fileName}» را فرستاد${wsNote ? ' و این فایل در فضای کار (workspace) ذخیره شد' : ''}]\nدرخواست کاربر: ${caption}\n\nمحتوای فایل:\n\`\`\`\n${preview}\n\`\`\``, env, settings, { historyText: `[فایل «${fileName}» ارسال شد] ${caption}` });
 return;
 }
 
-if (!settings.ai_api_key && !env.OPENAI_API_KEY) {
+if (!(await hasAnyAI(userId, env, settings))) {
 const report = analyzeCode(text, null);
-await sendLongMessage(chatId, `📄 فایل «${fileName}»:\n\n${report}\n\n💡 برای تحلیل کامل، کلید API هوش مصنوعی را در پنل تنظیم کنید.`, env);
+await sendLongMessage(chatId, `📄 فایل «${fileName}»:\n\n${report}\n\n💡 برای تحلیل کامل، کلید API را در پنل تنظیم کنید یا با /ai مدل شخصی خودتان را وصل کنید.`, env);
 return;
 }
 
@@ -1091,7 +1307,7 @@ const numbered = addLineNumbers(truncated);
 const reply = await callAI([
 { role: 'system', content: PROMPTS.file + '\nشماره خطوط (مثل «12|») فقط برای ارجاع است و در کد اصلاح‌شده نباید بیاید.' },
 { role: 'user', content: `نام فایل: ${fileName}\n${caption ? 'درخواست کاربر: ' + caption + '\n' : ''}محتوا:\n${numbered}` }
-], env, { max_tokens: 2500 });
+], env, { userId, max_tokens: 2500 });
 
 await addHistory(chatId, [
 { role: 'user', content: `[فایل «${fileName}» ارسال شد] ${caption || ''}`.trim() },
@@ -1124,7 +1340,7 @@ console.error('workspace save error', e);
 }
 
 // اگر کاربر زیر ZIP درخواستی نوشته (مثلاً پوش به گیت‌هاب)، ایجنت انجامش می‌دهد
-if (caption && (settings.ai_api_key || env.OPENAI_API_KEY)) {
+if (caption && (await hasAnyAI(userId, env, settings))) {
 const note = wsInfo
 ? `[کاربر فایل ZIP «${fileName}» را فرستاد. ${wsInfo.count} فایل (${formatSizeClient(wsInfo.bytes)}) در فضای کار (workspace) ذخیره شد${wsInfo.skipped ? `؛ ${wsInfo.skipped} فایل (node_modules، .git، .env و...) کنار گذاشته شد` : ''}. برای دیدن فایل‌ها از workspace_list_files استفاده کن.]`
 : `[کاربر فایل ZIP «${fileName}» را فرستاد اما ذخیره در فضای کار ناموفق بود.]`;
@@ -1186,8 +1402,8 @@ if (skippedForSize.length) msg += `\n⚠️ به‌دلیل حجم زیاد ${sk
 if (batches.length > 1) msg += `\n⏳ پروژه بزرگ است؛ در ${batches.length} بخش بررسی می‌شود.`;
 await sendMessage(chatId, msg, env);
 
-if (!settings.ai_api_key && !env.OPENAI_API_KEY) {
-await sendMessage(chatId, '💡 برای تحلیل محتوای پروژه، کلید API هوش مصنوعی را در پنل تنظیم کنید.', env);
+if (!(await hasAnyAI(userId, env, settings))) {
+await sendMessage(chatId, '💡 برای تحلیل محتوای پروژه، کلید API را در پنل تنظیم کنید یا با /ai مدل شخصی خودتان را وصل کنید.', env);
 return;
 }
 
@@ -1202,7 +1418,7 @@ userContent += `\nکدها:${batches[i].join('')}`;
 const reply = await callAI([
 { role: 'system', content: PROMPTS.zip },
 { role: 'user', content: userContent }
-], env, { max_tokens: 3500 });
+], env, { userId, max_tokens: 3500 });
 replies.push(reply);
 
 const title = batches.length > 1 ? `🔍 تحلیل پروژه (بخش ${i + 1}/${batches.length}):` : '🔍 تحلیل پروژه:';
@@ -1959,17 +2175,19 @@ const messages = [
 const ctx = { env, chatId, userId, token: token || null, login: null };
 const status = createStatus(chatId, env);
 let finalText = '';
-let useTools = !agentToolsUnsupported;
+// با مدل شخصی کاربر، پرچم سراسری نادیده گرفته می‌شود (ممکن است مدل او ابزارها را پشتیبانی کند)
+const userConn = await getUserAIConn(userId, env);
+let useTools = userConn ? true : !agentToolsUnsupported;
 const failures = {};
 
 for (let step = 0; step < AGENT_MAX_STEPS; step++) {
 let msg;
 try {
-msg = await callAI(messages, env, { raw: true, tools: useTools ? AGENT_TOOLS : undefined, max_tokens: 4000, temperature: 0.5 });
+msg = await callAI(messages, env, { userId, raw: true, tools: useTools ? AGENT_TOOLS : undefined, max_tokens: 4000, temperature: 0.5 });
 } catch (e) {
 // اگر سرویس از ابزارها پشتیبانی نکند، بدون ابزار ادامه بده
 if (useTools && step === 0 && (e.status === 400 || e.status === 422) && /tool|function/i.test(e.message)) {
-agentToolsUnsupported = true;
+if (!userConn) agentToolsUnsupported = true;
 useTools = false;
 step--;
 continue;
@@ -2008,7 +2226,7 @@ messages.push({ role: 'tool', tool_call_id: call.id, content: stringifyToolResul
 if (!finalText) {
 messages.push({ role: 'user', content: 'به سقف تعداد قدم‌ها رسیدی. بدون ابزار، کوتاه بگو تا اینجا چه کار شد، چه چیزی مانده و کاربر چه کند.' });
 try {
-finalText = await callAI(messages, env, { max_tokens: 1500 });
+finalText = await callAI(messages, env, { userId, max_tokens: 1500 });
 } catch (e) {
 finalText = 'کار طولانی شد و نیمه‌کاره ماند. بگو ادامه بدم.';
 }
@@ -2114,12 +2332,16 @@ const newValue = (parseInt(current) || 0) + 1;
 await env.STATS.put(statName, newValue.toString());
 }
 
-async function sendMessage(chatId, text, env) {
+async function sendMessage(chatId, text, env, keyboard = null) {
 const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
 return await fetch(url, {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ chat_id: chatId, text: text })
+body: JSON.stringify({
+chat_id: chatId,
+text: text,
+...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {})
+})
 });
 }
 
