@@ -58,21 +58,24 @@ const check = (name, cond, extra) => {
 
 // ۱) /start باید دکمه‌های شیشه‌ای داشته باشد
 await fire(msg('/start'));
-check('start با کیبورد شیشه‌ای', !!lastBotMsg().body.reply_markup?.inline_keyboard);
+const sk = lastBotMsg().body.reply_markup;
+check('start با کیبورد ثابت پایین', !!sk?.keyboard && sk.is_persistent && sk.resize_keyboard && !sk.inline_keyboard, sk);
+check('دکمه اتصال در کیبورد', JSON.stringify(sk).includes('🔌 اتصال مدل'));
 
 // ۲) /ai منو را نشان می‌دهد
 await fire(msg('/ai'));
 const menu = lastBotMsg();
 check('منوی /ai', menu.body.text.includes('هوش مصنوعی شخصی'), menu.body.text);
-check('دکمه اتصال', JSON.stringify(menu.body.reply_markup).includes('ai:connect'));
+check('منو بدون دکمه شیشه‌ای', !menu.body.reply_markup?.inline_keyboard && menu.body.parse_mode === 'HTML');
 
 // ۳) کلیک روی دکمه اتصال → قدم ۱
-await fire(cb('ai:connect'));
-check('قدم ۱ Base URL', lastBotMsg().body.text.includes('قدم ۱'), lastBotMsg().body.text);
+await fire(msg('🔌 اتصال مدل'));
+check('قدم ۱ Base URL (دکمه کیبورد)', lastBotMsg().body.text.includes('قدم ۱'), lastBotMsg().body.text);
+check('کیبورد لغو', JSON.stringify(lastBotMsg().body.reply_markup).includes('❌ لغو'));
 
 // ۴) URL نامعتبر رد می‌شود
 await fire(msg('https://api.example.com'));
-check('رد URL بدون /v1', lastBotMsg().body.text.includes('باید با /v1'), lastBotMsg().body.text);
+check('رد URL بدون /v1', lastBotMsg().body.text.includes('باید با'), lastBotMsg().body.text);
 
 // ۵) URL معتبر → قدم ۲
 await fire(msg('https://api.example.com/v1/'));
@@ -96,6 +99,7 @@ check('مدل کاربر', aiCalls[0]?.body.model === 'gpt-4o-mini', aiCalls[0]?
 check('کلید کاربر', aiCalls[0]?.auth === 'Bearer sk-test-1234567890abcdef', aiCalls[0]?.auth);
 check('پیام موفقیت', lastBotMsg().body.text.includes('متصل شدی'), lastBotMsg().body.text);
 const conn = JSON.parse(kv.get('ai_conn:42'));
+check('کیبورد متصل (تغییر/حذف)', JSON.stringify(lastBotMsg().body.reply_markup).includes('🗑 حذف اتصال'));
 check('ذخیره در KV', conn.model === 'gpt-4o-mini' && conn.base_url === 'https://api.example.com/v1');
 
 // ۹) جریان پس از اتصال غیرفعال است (پیام عادی به چت می‌رود)
@@ -104,13 +108,21 @@ await fire(msg('سلام ربات'));
 check('چت با مدل کاربر', aiCalls.some(c => c.url.includes('api.example.com') && c.body.model === 'gpt-4o-mini'), aiCalls.map(c => c.url));
 
 // ۱۰) وضعیت منو بعد از اتصال
-await fire(cb('ai:status'));
+await fire(msg('📊 وضعیت اتصال'));
 check('وضعیت: مدل کاربر', lastBotMsg().body.text.includes('gpt-4o-mini'), lastBotMsg().body.text);
 check('کلید ماسک شده', lastBotMsg().body.text.includes('••••') && !lastBotMsg().body.text.includes('sk-test-1234567890abcdef'));
 
 // ۱۱) حذف اتصال با دکمه
-await fire(cb('ai:remove'));
+await fire(msg('🗑 حذف اتصال'));
 check('حذف اتصال', !kv.has('ai_conn:42') && lastBotMsg().body.text.includes('حذف شد'));
+
+// ۱۱.۵) لغو وسط جریان
+await fire(msg('🔌 اتصال مدل'));
+await fire(msg('❌ لغو'));
+check('لغو با دکمه', !kv.has('ai_flow:42') && JSON.stringify(lastBotMsg().body.reply_markup).includes('🔌 اتصال مدل'));
+// دکمه شیشه‌ای قدیمی هنوز کار می‌کند
+await fire(cb('ai:status'));
+check('سازگاری دکمه قدیمی', lastBotMsg().body.text.includes('هوش مصنوعی شخصی'));
 
 // ۱۲) کاربر دوم مستقل است (تفکیک per-user)
 await fire(cb('ai:connect', 77));

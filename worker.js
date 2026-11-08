@@ -609,35 +609,107 @@ if (settings?.ai_api_key || env.OPENAI_API_KEY) return true;
 return !!(await getUserAIConn(userId, env));
 }
 
-// دکمه‌های شیشه‌ای ثابت منوی هوش مصنوعی
-function aiMenuKeyboard(connected) {
-const rows = [[{ text: '🔌 اتصال مدل شخصی', callback_data: 'ai:connect' }]];
-rows.push(connected
-? [{ text: '📊 وضعیت اتصال', callback_data: 'ai:status' }, { text: '🗑 حذف اتصال', callback_data: 'ai:remove' }]
-: [{ text: '📊 وضعیت اتصال', callback_data: 'ai:status' }]);
-return rows;
+// =============== کیبورد ثابت پایین صفحه (Reply Keyboard) ===============
+// دکمه‌های اتصال به‌صورت ثابت در پایین صفحه (جای کیبورد) نمایش داده می‌شوند،
+// نه زیر هر پیام. با تغییر وضعیت اتصال، کیبورد هم به‌روز می‌شود.
+const BTN = {
+connect: '🔌 اتصال مدل',
+change: '🔄 تغییر مدل',
+status: '📊 وضعیت اتصال',
+remove: '🗑 حذف اتصال',
+help: '📋 راهنما',
+cancel: '❌ لغو'
+};
+
+function mainKeyboard(connected) {
+return {
+keyboard: connected
+? [[{ text: BTN.status }, { text: BTN.change }], [{ text: BTN.remove }, { text: BTN.help }]]
+: [[{ text: BTN.connect }], [{ text: BTN.status }, { text: BTN.help }]],
+resize_keyboard: true,
+is_persistent: true,
+input_field_placeholder: 'پیام، کد یا سوالت را بنویس...'
+};
 }
 
-const CANCEL_KB = [[{ text: '❌ لغو', callback_data: 'ai:cancel' }]];
+function cancelKeyboard() {
+return {
+keyboard: [[{ text: BTN.cancel }]],
+resize_keyboard: true,
+is_persistent: true,
+input_field_placeholder: 'مقدار خواسته‌شده را بفرست...'
+};
+}
+
+// سازگاری با پیام‌های قدیمی که دکمه شیشه‌ای داشتند
+function aiMenuKeyboard(connected) { return mainKeyboard(connected); }
 
 async function sendAiMenu(chatId, userId, env) {
 const conn = await getUserAIConn(userId, env);
 let text;
 if (conn) {
-text = '🤖 هوش مصنوعی شخصی شما:\n\n' +
-`• Base URL: ${conn.base_url}\n` +
-`• مدل: ${conn.model}\n` +
-`• API Key: ${maskApiKey(conn.api_key)}\n\n` +
-'✅ همه قابلیت‌های ربات (چت، دیباگ، تحلیل عکس، فایل، ZIP و ایجنت گیت‌هاب) با مدل شما کار می‌کنند.';
+text = '🤖 <b>هوش مصنوعی شخصی</b>\n\n' +
+'وضعیت: ✅ متصل\n' +
+`مدل: <code>${escapeHtml(conn.model)}</code>\n` +
+`Base URL: <code>${escapeHtml(conn.base_url)}</code>\n` +
+`API Key: <code>${escapeHtml(maskApiKey(conn.api_key))}</code>\n\n` +
+'همه قابلیت‌های ربات (چت، دیباگ، تحلیل عکس، فایل، ZIP و ایجنت گیت‌هاب) با همین مدل کار می‌کنند.';
 } else {
-text = '🤖 هوش مصنوعی شخصی:\n\n' +
-'اگر به مدل پولی یا رایگان دسترسی داری (هر سرویس سازگار با OpenAI API)، اتصالش کن تا همه قابلیت‌های ربات با مدل خودت کار کنه.\n\n' +
-'چیزهایی که لازمه:\n' +
-'1️⃣ Base URL — باید به /v1 ختم بشه. مثال:\nhttps://api.openai.com/v1\n' +
-'2️⃣ API Key خودت\n' +
-'3️⃣ نام مدل — مثال: gpt-4o-mini';
+text = '🤖 <b>هوش مصنوعی شخصی</b>\n\n' +
+'وضعیت: ⚪️ متصل نیست\n\n' +
+'اگر به مدل پولی یا رایگان دسترسی داری (هر سرویس سازگار با OpenAI API)، با دکمه «' + BTN.connect + '» وصلش کن.\n\n' +
+'لازم داری:\n' +
+'1. Base URL (باید به <code>/v1</code> ختم بشه)\n' +
+'2. API Key\n' +
+'3. نام مدل';
 }
-await sendMessage(chatId, text, env, aiMenuKeyboard(!!conn));
+await sendMessage(chatId, text, env, mainKeyboard(!!conn), 'HTML');
+}
+
+async function startAiConnectFlow(chatId, userId, env) {
+await env.STATS.put(aiFlowKey(userId), JSON.stringify({ step: 'base_url', data: {} }), { expirationTtl: 600 });
+await sendMessage(chatId,
+'🔗 <b>قدم ۱ از ۳ — Base URL</b>\n\n' +
+'آدرس سرویس را بفرست؛ باید به <code>/v1</code> ختم بشه.\n\n' +
+'نمونه‌ها:\n' +
+'<code>https://api.openai.com/v1</code>\n' +
+'<code>https://api.groq.com/openai/v1</code>\n' +
+'<code>https://openrouter.ai/api/v1</code>', env, cancelKeyboard(), 'HTML');
+}
+
+async function removeAiConn(chatId, userId, env) {
+await env.STATS.delete(aiConnKey(userId));
+await env.STATS.delete(aiFlowKey(userId));
+await sendMessage(chatId, '🗑 اتصال هوش مصنوعی شخصی حذف شد.\nاز این به بعد از مدل پیش‌فرض ربات استفاده میشه (اگر ادمین تنظیم کرده باشه).', env, mainKeyboard(false));
+}
+
+// دکمه‌های کیبورد ثابت؛ اگر پیام یکی از دکمه‌ها بود true برمی‌گردد
+async function handleKeyboardButton(chatId, userId, text, env) {
+const t = (text || '').trim();
+switch (t) {
+case BTN.connect:
+case BTN.change:
+await startAiConnectFlow(chatId, userId, env);
+return true;
+case BTN.status:
+await env.STATS.delete(aiFlowKey(userId));
+await sendAiMenu(chatId, userId, env);
+return true;
+case BTN.remove:
+await removeAiConn(chatId, userId, env);
+return true;
+case BTN.cancel: {
+const had = await env.STATS.get(aiFlowKey(userId));
+await env.STATS.delete(aiFlowKey(userId));
+const conn = await getUserAIConn(userId, env);
+await sendMessage(chatId, had ? '❌ لغو شد.' : 'کاری برای لغو نبود.', env, mainKeyboard(!!conn));
+return true;
+}
+case BTN.help:
+await handleCommand(chatId, userId, '/help', env, null);
+return true;
+}
+return false;
 }
 
 // تست اتصال با مشخصات شخصی کاربر (مستقیم، بدون ذخیره)
@@ -665,7 +737,7 @@ if (!content) throw new Error('پاسخی از مدل دریافت نشد');
 return String(content).trim().substring(0, 60);
 }
 
-// پردازش دکمه‌های شیشه‌ای (callback)
+// دکمه‌های شیشه‌ای پیام‌های قدیمی (callback) — برای سازگاری نگه داشته شده
 async function handleCallbackQuery(cb, env) {
 try { await answerCallbackQuery(cb.id, env); } catch (e) {}
 const chatId = cb.message?.chat?.id;
@@ -673,26 +745,10 @@ const userId = cb.from?.id;
 const data = cb.data || '';
 if (!chatId || !userId) return;
 try {
-if (data === 'ai:menu') {
-await sendAiMenu(chatId, userId, env);
-} else if (data === 'ai:cancel') {
-await env.STATS.delete(aiFlowKey(userId));
-await sendAiMenu(chatId, userId, env);
-} else if (data === 'ai:connect') {
-await env.STATS.put(aiFlowKey(userId), JSON.stringify({ step: 'base_url', data: {} }), { expirationTtl: 600 });
-await sendMessage(chatId,
-'🔗 قدم ۱ از ۳ — Base URL سرویس را بفرست.\n\nباید به /v1 ختم بشه. چند مثال:\n' +
-'https://api.openai.com/v1\n' +
-'https://api.groq.com/openai/v1\n' +
-'https://openrouter.ai/api/v1\n\n' +
-'برای لغو، دکمه پایین یا دستور /cancel', env, CANCEL_KB);
-} else if (data === 'ai:status') {
-await sendAiMenu(chatId, userId, env);
-} else if (data === 'ai:remove') {
-await env.STATS.delete(aiConnKey(userId));
-await env.STATS.delete(aiFlowKey(userId));
-await sendMessage(chatId, '🗑 اتصال هوش مصنوعی شخصی حذف شد.\nاز این به بعد از مدل پیش‌فرض ربات استفاده میشه (اگر ادمین تنظیم کرده باشه).', env, aiMenuKeyboard(false));
-}
+if (data === 'ai:connect') await startAiConnectFlow(chatId, userId, env);
+else if (data === 'ai:remove') await removeAiConn(chatId, userId, env);
+else if (data === 'ai:cancel') { await env.STATS.delete(aiFlowKey(userId)); await sendAiMenu(chatId, userId, env); }
+else await sendAiMenu(chatId, userId, env);
 } catch (e) {
 console.error('callback error', e);
 }
@@ -719,39 +775,40 @@ const t = (text || '').trim();
 if (!t) return false;
 if (t.toLowerCase() === '/cancel' || t === 'لغو') {
 await env.STATS.delete(aiFlowKey(userId));
-await sendMessage(chatId, '❌ اتصال لغو شد.', env, aiMenuKeyboard(false));
+const conn = await getUserAIConn(userId, env);
+await sendMessage(chatId, '❌ لغو شد.', env, mainKeyboard(!!conn));
 return true;
 }
 
 if (flow.step === 'base_url') {
 const url = t.replace(/\/+$/, '');
 if (!/^https?:\/\/[^\s]+\/v1$/i.test(url)) {
-await sendMessage(chatId, '⚠️ Base URL باید با /v1 تمام بشه.\nمثال درست: https://api.openai.com/v1\nدوباره بفرست یا /cancel', env, CANCEL_KB);
+await sendMessage(chatId, '⚠️ Base URL باید با <code>/v1</code> تمام بشه.\nمثال: <code>https://api.openai.com/v1</code>\n\nدوباره بفرست.', env, cancelKeyboard(), 'HTML');
 return true;
 }
 flow = { step: 'api_key', data: { base_url: url } };
 await env.STATS.put(aiFlowKey(userId), JSON.stringify(flow), { expirationTtl: 600 });
-await sendMessage(chatId, '✅ Base URL ثبت شد.\n\n🔑 قدم ۲ از ۳ — حالا API Key را بفرست.\n\n🔒 پیام کلید بلافاصله از چت پاک میشه و فقط برای خودت ذخیره میشه.', env, CANCEL_KB);
+await sendMessage(chatId, '✅ Base URL ثبت شد.\n\n🔑 <b>قدم ۲ از ۳ — API Key</b>\n\nکلید را بفرست. پیامش بلافاصله از چت پاک میشه و فقط برای خودت ذخیره میشه.', env, cancelKeyboard(), 'HTML');
 return true;
 }
 
 if (flow.step === 'api_key') {
 if (t.length < 8 || /\s/.test(t)) {
-await sendMessage(chatId, '⚠️ این به نظر کلید API معتبری نمیاد (بدون فاصله و حداقل ۸ کاراکتر). دوباره بفرست یا /cancel', env, CANCEL_KB);
+await sendMessage(chatId, '⚠️ این کلید معتبر به نظر نمیاد (بدون فاصله و حداقل ۸ کاراکتر). دوباره بفرست.', env, cancelKeyboard());
 return true;
 }
 const deleted = await deleteTelegramMessage(chatId, messageId, env);
 flow = { step: 'model', data: { ...flow.data, api_key: t } };
 await env.STATS.put(aiFlowKey(userId), JSON.stringify(flow), { expirationTtl: 600 });
 let msg = '✅ API Key ثبت شد' + (deleted ? ' و پیامش از چت پاک شد.' : '. (نتونستم پیامش رو پاک کنم؛ خودت پاکش کن)');
-msg += '\n\n🧠 قدم ۳ از ۳ — حالا نام مدل را بفرست.\nمثال: gpt-4o-mini یا llama-3.3-70b-versatile';
-await sendMessage(chatId, msg, env, CANCEL_KB);
+msg += '\n\n🧠 <b>قدم ۳ از ۳ — نام مدل</b>\n\nمثال: <code>gpt-4o-mini</code> یا <code>llama-3.3-70b-versatile</code>';
+await sendMessage(chatId, msg, env, cancelKeyboard(), 'HTML');
 return true;
 }
 
 if (flow.step === 'model') {
 if (t.includes('\n') || t.length > 100) {
-await sendMessage(chatId, '⚠️ فقط نام مدل را بفرست. مثال: gpt-4o-mini\nدوباره بفرست یا /cancel', env, CANCEL_KB);
+await sendMessage(chatId, '⚠️ فقط نام مدل را بفرست. مثال: <code>gpt-4o-mini</code>', env, cancelKeyboard(), 'HTML');
 return true;
 }
 const conn = { ...flow.data, model: t };
@@ -761,14 +818,13 @@ await testUserAIConn(conn, env);
 await env.STATS.put(aiConnKey(userId), JSON.stringify(conn));
 await env.STATS.delete(aiFlowKey(userId));
 await sendMessage(chatId,
-`🎉 متصل شدی! از این به بعد همه قابلیت‌های ربات با مدل «${conn.model}» کار می‌کنند.\n\n` +
-'💡 برای تحلیل عکس، مدل باید قابلیت بینایی (vision) داشته باشه.\n' +
-'برای تغییر یا حذف، دوباره /ai رو بزن.', env, aiMenuKeyboard(true));
+`🎉 <b>متصل شدی</b>\n\nمدل <code>${escapeHtml(conn.model)}</code> فعال شد و همه قابلیت‌های ربات با همین مدل کار می‌کنند.\n\n` +
+'💡 برای تحلیل عکس، مدل باید قابلیت بینایی (vision) داشته باشه.', env, mainKeyboard(true), 'HTML');
 } catch (e) {
-// جریان در همین قدم می‌ماند تا کاربر نام مدل دیگری بفرشد
+// جریان در همین قدم می‌ماند تا کاربر نام مدل دیگری بفرستد
 await sendMessage(chatId,
-`❌ تست اتصال ناموفق بود: ${e.message}\n\n` +
-'نام مدل دیگری بفرست، یا اگر Base URL / کلید مشکل داره با /cancel خارج شو و از اول /ai رو بزن.', env, CANCEL_KB);
+`❌ تست اتصال ناموفق بود:\n${e.message}\n\n` +
+'نام مدل دیگری بفرست، یا اگر Base URL یا کلید مشکل داره «' + BTN.cancel + '» را بزن و از اول شروع کن.', env, cancelKeyboard());
 }
 return true;
 }
@@ -967,6 +1023,8 @@ await handleCommand(chatId, userId, text, env, messageId);
 } else if (looksLikeGithubToken(text)) {
 // کاربر توکن را بدون دستور فرستاده
 await saveGithubTokenFromChat(chatId, userId, text.trim(), env, messageId);
+} else if (await handleKeyboardButton(chatId, userId, text, env)) {
+// یکی از دکمه‌های کیبورد ثابت زده شد
 } else if (await handleAiFlowInput(chatId, userId, text, env, messageId)) {
 // پیام در جریان اتصال مدل شخصی مصرف شد
 } else {
@@ -993,9 +1051,7 @@ break;
 
 case '/ai': {
 if (['off', 'remove', 'حذف'].includes((args[0] || '').toLowerCase())) {
-await env.STATS.delete(aiConnKey(userId));
-await env.STATS.delete(aiFlowKey(userId));
-await sendMessage(chatId, '🗑 اتصال هوش مصنوعی شخصی حذف شد.', env, aiMenuKeyboard(false));
+await removeAiConn(chatId, userId, env);
 } else {
 await sendAiMenu(chatId, userId, env);
 }
@@ -2332,15 +2388,18 @@ const newValue = (parseInt(current) || 0) + 1;
 await env.STATS.put(statName, newValue.toString());
 }
 
-async function sendMessage(chatId, text, env, keyboard = null) {
+async function sendMessage(chatId, text, env, markup = null, parseMode = null) {
 const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+// markup: آرایه ردیف‌ها = دکمه شیشه‌ای | شیء = reply_markup کامل (مثلاً کیبورد ثابت)
+const reply_markup = !markup ? null : (Array.isArray(markup) ? { inline_keyboard: markup } : markup);
 return await fetch(url, {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({
 chat_id: chatId,
 text: text,
-...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {})
+...(parseMode ? { parse_mode: parseMode } : {}),
+...(reply_markup ? { reply_markup } : {})
 })
 });
 }
