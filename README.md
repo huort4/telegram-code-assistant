@@ -38,6 +38,8 @@ npx wrangler secret put ADMIN_SECRET           # اختیاری - برای پن�
 npx wrangler secret put WEBHOOK_SECRET         # اختیاری
 ```
 
+⚠️ نکته مهم: ورکر زنده در کلودفلر `silent-pine-e5cd` نام دارد (نه `telegram-code-assistant`) و توکن ربات در آن به‌صورت متغیر plain text در داشبورد تنظیم شده است. در اولین فرصت بهتر است به secret تبدیل شود. اگر توکن را از داشبورد حذف و با `wrangler secret put` دوباره تنظیم کنید، این مشکل برطرف می‌شود.
+
 ### Bindings
 
 - **D1 Database**: برای حافظه گفتگو و کاربران

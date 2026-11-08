@@ -1,4 +1,4 @@
-name = "telegram-code-assistant"
+name = "silent-pine-e5cd"
 main = "worker.js"
 compatibility_date = "2024-11-05"
 
@@ -8,14 +8,15 @@ binding = "DB"
 database_name = "bot-db"
 database_id = "62205681-a294-416a-9e92-e813bc191d28"
 
-# KV Namespaces
+# KV Namespaces — در این حساب فقط یک namespace با نام «KV» وجود دارد
+# و هر دو بایند STATS و FILES به آن متصل‌اند (مطابق پیکربندی زنده ورکر)
 [[kv_namespaces]]
 binding = "STATS"
-id = "b33bddbc0e8c4d07813dae687f2a41f9"
+id = "42ea39d7093b474b99da956e06eef68a"
 
 [[kv_namespaces]]
 binding = "FILES"
-id = "d965651f54e944a99fabe8f044d608b7"
+id = "42ea39d7093b474b99da956e06eef68a"
 
 # Environment Variables (Secrets should be set via wrangler secret)
 [vars]
